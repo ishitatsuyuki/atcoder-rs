@@ -1,5 +1,6 @@
 use serde::de;
 use std::fmt::Display;
+use percent_encoding::percent_decode;
 
 error_chain! {
     errors {
@@ -23,36 +24,35 @@ impl de::Error for Error {
 }
 
 pub struct Deserializer<'de> {
-    input: &'de [u8],
+    input: ::std::iter::Peekable<
+        ::std::iter::Map<::percent_encoding::PercentDecode<'de>, fn(u8) -> u8>,
+    >,
 }
 
 impl<'de> Deserializer<'de> {
     /// Create a revel deserializer.
     pub fn from_bytes(input: &'de [u8]) -> Self {
-        Deserializer { input: input }
-    }
-
-    fn peek_byte(&mut self) -> Result<u8> {
-        self.input
-            .iter()
-            .next()
-            .cloned()
-            .ok_or(ErrorKind::Eof.into())
+        fn transform(x: u8) -> u8 {
+            if x == b'+' {
+                b' '
+            } else {
+                x
+            }
+        }
+        Deserializer {
+            input: percent_decode(input)
+                .map(transform as fn(u8) -> u8)
+                .peekable(),
+        }
     }
 
     fn next_byte(&mut self) -> Result<u8> {
-        let ch = self.peek_byte()?;
-        self.input = &self.input[1..];
-        Ok(ch)
+        self.input.next().ok_or(ErrorKind::Eof.into())
     }
 
-    fn parse_sequence(&mut self) -> Result<&'de [u8]> {
-        match self.input.iter().position(|&x| x == b':' || x == 0) {
-            Some(len) => {
-                let s = &self.input[..len];
-                self.input = &self.input[len..];
-                Ok(s)
-            }
+    fn parse_sequence(&mut self) -> Result<Vec<u8>> {
+        match self.input.clone().position(|x| x == b':' || x == 0) {
+            Some(len) => Ok((&mut self.input).take(len).collect()),
             None => {
                 bail!(ErrorKind::Eof);
             }
@@ -63,26 +63,19 @@ impl<'de> Deserializer<'de> {
 impl<'a, 'de> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     type Error = Error;
 
-    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value>
-    where
-        V: de::Visitor<'de>,
-    {
-        visitor.visit_borrowed_str(::std::str::from_utf8(self.parse_sequence()?)
-            .chain_err(|| ErrorKind::InvalidInput)?)
-    }
-
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_str(visitor)
+        visitor.visit_string(String::from_utf8(self.parse_sequence()?)
+            .chain_err(|| ErrorKind::InvalidInput)?)
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_str(visitor)
+        self.deserialize_string(visitor)
     }
 
     fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
@@ -96,7 +89,7 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        self.deserialize_str(visitor)
+        self.deserialize_string(visitor)
     }
 
     fn deserialize_map<V>(self, visitor: V) -> Result<V::Value>
@@ -209,6 +202,13 @@ impl<'a, 'de> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         unimplemented!()
     }
 
+    fn deserialize_str<V>(self, _visitor: V) -> Result<V::Value>
+    where
+        V: de::Visitor<'de>,
+    {
+        unimplemented!()
+    }
+
     fn deserialize_bytes<V>(self, _visitor: V) -> Result<V::Value>
     where
         V: de::Visitor<'de>,
@@ -294,7 +294,7 @@ impl<'de, 'a> de::MapAccess<'de> for SequenceParser<'a, 'de> {
     where
         K: de::DeserializeSeed<'de>,
     {
-        if self.de.input.is_empty() {
+        if self.de.input.peek().is_none() {
             Ok(None)
         } else {
             ensure!(self.de.next_byte()? == 0, ErrorKind::InvalidInput);
@@ -332,15 +332,18 @@ mod tests {
     #[test]
     fn test_parse() {
         use std::collections::HashMap;
-        let input = b"\x00a:b\x00\x00c:d\x00";
-        let expected: HashMap<_, _> = [("a", "b"), ("c", "d")].iter().cloned().collect();
+        let input = b"%00a%3Ab%00%00c%3Ad%00";
+        let expected: HashMap<_, _> = [("a", "b"), ("c", "d")]
+            .iter()
+            .map(|&(x, y)| (x.to_owned(), y.to_owned()))
+            .collect();
         let actual = super::from_bytes(&*input).unwrap();
         assert_eq!(expected, actual);
     }
 
     #[test]
     fn test_flash_error() {
-        let input = b"\x00error:Wrong password\x00\x00unneeded:a\x00";
+        let input = b"%00error%3AWrong+password%00%00unneeded%3Aa%00";
         let expected = super::RevelFlash {
             success: None,
             error: Some("Wrong password".to_owned()),

@@ -21,7 +21,6 @@ use reqwest::header::{Cookie, SetCookie};
 use reqwest::RedirectPolicy;
 use reqwest::StatusCode;
 use cookie::Cookie as CookieParser;
-use percent_encoding::percent_decode;
 use select::document::Document;
 use select::predicate::Attr;
 
@@ -163,13 +162,11 @@ pub fn login(
                     });
                 }
                 if cookie.name() == "REVEL_FLASH" {
-                    let decoded: Vec<_> = percent_decode(cookie.value().as_bytes()).collect();
-                    let flash: RevelFlash = revel_deserialize::from_bytes(&decoded)
-                        .chain_err(|| {
-                            ErrorKind::InvalidResponse(
-                                "Failed to decode \"REVEL_FLASH\"".to_owned(),
-                            )
-                        })?;
+                    let flash: RevelFlash = revel_deserialize::from_bytes(
+                        cookie.value().as_bytes(),
+                    ).chain_err(|| {
+                        ErrorKind::InvalidResponse("Failed to decode \"REVEL_FLASH\"".to_owned())
+                    })?;
                     if let Some(err) = flash.error {
                         bail!(ErrorKind::Unauthorized(err))
                     } else {
