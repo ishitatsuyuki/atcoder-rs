@@ -1,0 +1,20 @@
+[package]
+authors = ["Tatsuyuki Ishi <ishitatsuyuki@gmail.com>"]
+name = "atcoder"
+version = "0.1.0"
+[dependencies]
+cookie = "0.9.1"
+error-chain = "0.10.0"
+futures = "0.1.14"
+percent-encoding = "1.0.0"
+select = "0.4.2"
+serde = "1.0.11"
+serde_derive = "1.0.11"
+tokio-core = "0.1.9"
+
+[dependencies.reqwest]
+features = ["unstable"]
+version = "=0.7.1"
+
+[replace]
+"reqwest:0.7.1" = { git = 'https://github.com/king6cong/reqwest.git', branch = 'body_resolve'}
