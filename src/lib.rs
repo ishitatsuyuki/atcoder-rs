@@ -16,10 +16,9 @@ mod revel_deserialize;
 
 use futures::{Future, future};
 use tokio_core::reactor::Handle;
-use reqwest::unstable::async::Client;
+use reqwest::unstable::async::{Client, Response};
 use reqwest::header::{Cookie, SetCookie};
-use reqwest::RedirectPolicy;
-use reqwest::StatusCode;
+use reqwest::{RedirectPolicy, StatusCode};
 use cookie::Cookie as CookieParser;
 use select::document::Document;
 use select::predicate::Attr;
@@ -66,18 +65,25 @@ fn csrf_token(body: &str) -> Option<String> {
     node.and_then(|node| node.attr("value")).map(str::to_owned)
 }
 
-pub fn login(
-    username: &str,
-    password: &str,
+fn get_post(
+    get: String,
+    post: Option<String>,
+    mut form_data: Vec<(&'static str, String)>,
+    auth: Option<Authentication>,
     handle: &Handle,
-) -> impl Future<Item = (Authentication, Option<String>), Error = Error> {
+) -> impl Future<Item = Response, Error = Error> {
+    let post = post.unwrap_or(get.clone());
     future::lazy({
         let handle = handle.clone();
         move || -> Result<_> {
             let client = Client::builder()?
                 .redirect(RedirectPolicy::none())
                 .build(&handle)?;
-            let mut request = client.get(&format!("{}/login/", API_BASE))?;
+            let mut request = client.get(&get)?;
+            if let Some(auth) = auth {
+                let mut cookie = Cookie::new();
+                cookie.append("REVEL_SESSION", auth.session);
+            }
             Ok(request.send().from_err().join(Ok(client)))
         }
     }).flatten()
@@ -124,63 +130,72 @@ pub fn login(
             );
         })
         .and_then({
-            let username = username.to_owned();
-            let password = password.to_owned();
             move |(auth, csrf_token, client)| {
                 let mut cookie = Cookie::new();
                 cookie.append("REVEL_SESSION", auth.session);
-                let mut request = client.post(&format!("{}/login/", API_BASE))?;
+                let mut request = client.post(&post)?;
                 request.header(cookie);
-                request.form(&[
-                    ("username", username),
-                    ("password", password),
-                    ("csrf_token", csrf_token),
-                ])?;
+                form_data.push(("csrf_token", csrf_token));
+                request.form(&form_data)?;
                 Ok(request.send().from_err())
             }
         })
         .flatten()
-        .and_then(|response| {
-            let cookies = response
-                .headers()
-                .get::<SetCookie>()
-                .ok_or(ErrorKind::InvalidResponse("No cookie received".to_owned()))?;
-            ensure!(
-                response.status() == StatusCode::Found,
-                ErrorKind::BadStatus(response.status())
-            );
-            let mut result = None;
-            let mut success = None;
-            for raw_cookie in &**cookies {
-                let cookie = CookieParser::parse(&**raw_cookie)
+}
+
+pub fn login(
+    username: &str,
+    password: &str,
+    handle: &Handle,
+) -> impl Future<Item = (Authentication, Option<String>), Error = Error> {
+    get_post(
+        format!("{}/login/", API_BASE),
+        None,
+        vec![
+            ("username", username.to_owned()),
+            ("password", password.to_owned()),
+        ],
+        None,
+        handle,
+    ).and_then(|response| {
+        let cookies = response
+            .headers()
+            .get::<SetCookie>()
+            .ok_or(ErrorKind::InvalidResponse("No cookie received".to_owned()))?;
+        ensure!(
+            response.status() == StatusCode::Found,
+            ErrorKind::BadStatus(response.status())
+        );
+        let mut result = None;
+        let mut success = None;
+        for raw_cookie in &**cookies {
+            let cookie = CookieParser::parse(&**raw_cookie)
+                .chain_err(|| {
+                    ErrorKind::InvalidResponse("Failed to parse cookie".to_owned())
+                })?;
+            if cookie.name() == "REVEL_SESSION" {
+                result = Some(Authentication {
+                    session: cookie.value().to_owned(),
+                });
+            }
+            if cookie.name() == "REVEL_FLASH" {
+                let flash: RevelFlash = revel_deserialize::from_bytes(cookie.value().as_bytes())
                     .chain_err(|| {
-                        ErrorKind::InvalidResponse("Failed to parse cookie".to_owned())
-                    })?;
-                if cookie.name() == "REVEL_SESSION" {
-                    result = Some(Authentication {
-                        session: cookie.value().to_owned(),
-                    });
-                }
-                if cookie.name() == "REVEL_FLASH" {
-                    let flash: RevelFlash = revel_deserialize::from_bytes(
-                        cookie.value().as_bytes(),
-                    ).chain_err(|| {
                         ErrorKind::InvalidResponse("Failed to decode \"REVEL_FLASH\"".to_owned())
                     })?;
-                    if let Some(err) = flash.error {
-                        bail!(ErrorKind::Unauthorized(err))
-                    } else {
-                        success = flash.success;
-                    }
+                if let Some(err) = flash.error {
+                    bail!(ErrorKind::Unauthorized(err))
+                } else {
+                    success = flash.success;
                 }
             }
-            result
-                .ok_or(
-                    ErrorKind::InvalidResponse("No \"REVEL_SESSION\" cookie found".to_owned())
-                        .into(),
-                )
-                .map(|x| (x, success))
-        })
+        }
+        result
+            .ok_or(
+                ErrorKind::InvalidResponse("No \"REVEL_SESSION\" cookie found".to_owned()).into(),
+            )
+            .map(|x| (x, success))
+    })
 
 }
 
