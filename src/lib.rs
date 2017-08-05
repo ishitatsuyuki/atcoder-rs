@@ -14,7 +14,7 @@ extern crate select;
 
 mod revel_deserialize;
 
-use futures::{Future, future};
+use futures::{future, Future};
 use tokio_core::reactor::Handle;
 use reqwest::unstable::async::{Client, Response};
 use reqwest::header::{Cookie, SetCookie};
@@ -59,10 +59,17 @@ pub struct Authentication {
 fn csrf_token(body: &str) -> Option<String> {
     let document = Document::from(body);
     let mut candidate = document.find(Attr("name", "csrf_token"));
-    let node = candidate.next();
-    // TODO: handle multiple occurences
-    assert_eq!(candidate.count(), 0);
-    node.and_then(|node| node.attr("value")).map(str::to_owned)
+    if let Some(val) = candidate.next().and_then(|node| node.attr("value")) {
+        // Sanity check
+        for node in candidate {
+            if node.attr("value") != Some(val) {
+                return None;
+            }
+        }
+        Some(val.to_owned())
+    } else {
+        None
+    }
 }
 
 fn get_post(
