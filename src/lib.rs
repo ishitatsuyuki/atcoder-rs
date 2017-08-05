@@ -90,6 +90,7 @@ fn get_post(
             if let Some(auth) = auth {
                 let mut cookie = Cookie::new();
                 cookie.append("REVEL_SESSION", auth.session);
+                request.header(cookie);
             }
             Ok(request.send().from_err().join(Ok(client)))
         }
