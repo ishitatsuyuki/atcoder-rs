@@ -165,14 +165,14 @@ pub fn login(
         None,
         handle,
     ).and_then(|response| {
-        let cookies = response
-            .headers()
-            .get::<SetCookie>()
-            .ok_or(ErrorKind::InvalidResponse("No cookie received".to_owned()))?;
         ensure!(
             response.status() == StatusCode::Found,
             ErrorKind::BadStatus(response.status())
         );
+        let cookies = response
+            .headers()
+            .get::<SetCookie>()
+            .ok_or(ErrorKind::InvalidResponse("No cookie received".to_owned()))?;
         let mut result = None;
         let mut success = None;
         for raw_cookie in &**cookies {
@@ -203,23 +203,69 @@ pub fn login(
             )
             .map(|x| (x, success))
     })
+}
 
+pub fn logout(
+    auth: Authentication,
+    handle: &Handle,
+) -> impl Future<Item = Option<String>, Error = Error> {
+    get_post(
+        format!("{}", API_BASE),
+        Some(format!("{}/logout/", API_BASE)),
+        vec![],
+        Some(auth),
+        handle,
+    ).and_then(|response| {
+        ensure!(
+            response.status() == StatusCode::Found,
+            ErrorKind::BadStatus(response.status())
+        );
+        if let Some(cookie) = response.headers().get::<SetCookie>().and_then(|cookies| {
+            cookies
+                .iter()
+                .map(|raw| CookieParser::parse(&**raw))
+                .find(|cookie| {
+                    // FIXME: validate
+                    if let Ok(cookie) = cookie.as_ref() {
+                        cookie.name() == "REVEL_FLASH"
+                    } else {
+                        false
+                    }
+                })
+                .map(::std::result::Result::unwrap)
+        }) {
+            let flash: RevelFlash = revel_deserialize::from_bytes(cookie.value().as_bytes())
+                .chain_err(|| {
+                    ErrorKind::InvalidResponse("Failed to decode \"REVEL_FLASH\"".to_owned())
+                })?;
+            if let Some(err) = flash.error {
+                bail!(ErrorKind::InvalidResponse(err))
+            } else {
+                return Ok(flash.success);
+            }
+        } else {
+            Ok(None)
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::env;
     use tokio_core::reactor::Core;
+    use futures::Future;
 
     #[test]
     #[ignore]
-    fn test_login() {
+    fn test_login_logout() {
         let mut core = Core::new().unwrap();
         let handle = core.handle();
-        core.run(super::login(
-            &env::var("ATCODER_USERNAME").unwrap(),
-            &env::var("ATCODER_PASSWORD").unwrap(),
-            &handle,
-        )).unwrap();
+        core.run(
+            super::login(
+                &env::var("ATCODER_USERNAME").unwrap(),
+                &env::var("ATCODER_PASSWORD").unwrap(),
+                &handle,
+            ).and_then(|(auth, _)| super::logout(auth, &handle)),
+        ).unwrap()
     }
 }
