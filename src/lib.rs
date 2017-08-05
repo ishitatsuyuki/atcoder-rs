@@ -250,6 +250,58 @@ pub fn logout(
     })
 }
 
+pub fn join(
+    contest: &str,
+    auth: Authentication,
+    handle: &Handle,
+) -> impl Future<Item = (Option<String>, Authentication), Error = Error> {
+    get_post(
+        format!("{}/contests/{}/", API_BASE, contest),
+        Some(format!("{}/contests/{}/register/", API_BASE, contest)),
+        vec![],
+        Some(auth),
+        handle,
+    ).and_then(|response| {
+        ensure!(
+            response.status() == StatusCode::Found,
+            ErrorKind::BadStatus(response.status())
+        );
+        let cookies = response
+            .headers()
+            .get::<SetCookie>()
+            .ok_or(ErrorKind::InvalidResponse("No cookie received".to_owned()))?;
+        let mut result = None;
+        let mut success = None;
+        for raw_cookie in &**cookies {
+            let cookie = CookieParser::parse(&**raw_cookie)
+                .chain_err(|| {
+                    ErrorKind::InvalidResponse("Failed to parse cookie".to_owned())
+                })?;
+            if cookie.name() == "REVEL_SESSION" {
+                result = Some(Authentication {
+                    session: cookie.value().to_owned(),
+                });
+            }
+            if cookie.name() == "REVEL_FLASH" {
+                let flash: RevelFlash = revel_deserialize::from_bytes(cookie.value().as_bytes())
+                    .chain_err(|| {
+                        ErrorKind::InvalidResponse("Failed to decode \"REVEL_FLASH\"".to_owned())
+                    })?;
+                if let Some(err) = flash.error {
+                    bail!(ErrorKind::Unauthorized(err))
+                } else {
+                    success = flash.success;
+                }
+            }
+        }
+        result
+            .ok_or(
+                ErrorKind::InvalidResponse("No \"REVEL_SESSION\" cookie found".to_owned()).into(),
+            )
+            .map(|x| (success, x))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -267,6 +319,23 @@ mod tests {
                 &env::var("ATCODER_PASSWORD").unwrap(),
                 &handle,
             ).and_then(|(auth, _)| super::logout(auth, &handle)),
-        ).unwrap()
+        ).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn test_join() {
+        let mut core = Core::new().unwrap();
+        let handle = core.handle();
+        core.run(
+            super::login(
+                &env::var("ATCODER_USERNAME").unwrap(),
+                &env::var("ATCODER_PASSWORD").unwrap(),
+                &handle,
+            ).and_then(|(auth, _)| {
+                super::join(&env::var("ATCODER_CONTEST_JOIN").unwrap(), auth, &handle)
+            })
+                .and_then(|(_, auth)| super::logout(auth, &handle)),
+        ).unwrap();
     }
 }
