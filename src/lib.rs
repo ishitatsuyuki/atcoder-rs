@@ -16,7 +16,7 @@ mod revel_deserialize;
 
 use futures::{future, Future};
 use tokio_core::reactor::Handle;
-use reqwest::unstable::async::{Client, Response};
+use reqwest::unstable::async::Client;
 use reqwest::header::{Cookie, SetCookie};
 use reqwest::{RedirectPolicy, StatusCode};
 use cookie::Cookie as CookieParser;
@@ -78,7 +78,7 @@ fn get_post(
     mut form_data: Vec<(&'static str, String)>,
     auth: Option<Authentication>,
     handle: &Handle,
-) -> impl Future<Item = Response, Error = Error> {
+) -> impl Future<Item = (Option<String>, Authentication), Error = Error> {
     let post = post.unwrap_or(get.clone());
     future::lazy({
         let handle = handle.clone();
@@ -149,6 +149,47 @@ fn get_post(
             }
         })
         .flatten()
+        .and_then(|response| {
+            ensure!(
+                response.status() == StatusCode::Found,
+                ErrorKind::BadStatus(response.status())
+            );
+            let cookies = response
+                .headers()
+                .get::<SetCookie>()
+                .ok_or(ErrorKind::InvalidResponse("No cookie received".to_owned()))?;
+            let mut result = None;
+            let mut success = None;
+            for raw_cookie in &**cookies {
+                let cookie = CookieParser::parse(&**raw_cookie)
+                    .chain_err(|| {
+                        ErrorKind::InvalidResponse("Failed to parse cookie".to_owned())
+                    })?;
+                if cookie.name() == "REVEL_SESSION" {
+                    result = Some(Authentication {
+                        session: cookie.value().to_owned(),
+                    });
+                }
+                if cookie.name() == "REVEL_FLASH" {
+                    let flash: RevelFlash = revel_deserialize::from_bytes(
+                        cookie.value().as_bytes(),
+                    ).chain_err(|| {
+                        ErrorKind::InvalidResponse("Failed to decode \"REVEL_FLASH\"".to_owned())
+                    })?;
+                    if let Some(err) = flash.error {
+                        bail!(ErrorKind::Unauthorized(err))
+                    } else {
+                        success = flash.success;
+                    }
+                }
+            }
+            result
+                .ok_or(
+                    ErrorKind::InvalidResponse("No \"REVEL_SESSION\" cookie found".to_owned())
+                        .into(),
+                )
+                .map(|auth| (success, auth))
+        })
 }
 
 pub fn login(
@@ -165,45 +206,7 @@ pub fn login(
         ],
         None,
         handle,
-    ).and_then(|response| {
-        ensure!(
-            response.status() == StatusCode::Found,
-            ErrorKind::BadStatus(response.status())
-        );
-        let cookies = response
-            .headers()
-            .get::<SetCookie>()
-            .ok_or(ErrorKind::InvalidResponse("No cookie received".to_owned()))?;
-        let mut result = None;
-        let mut success = None;
-        for raw_cookie in &**cookies {
-            let cookie = CookieParser::parse(&**raw_cookie)
-                .chain_err(|| {
-                    ErrorKind::InvalidResponse("Failed to parse cookie".to_owned())
-                })?;
-            if cookie.name() == "REVEL_SESSION" {
-                result = Some(Authentication {
-                    session: cookie.value().to_owned(),
-                });
-            }
-            if cookie.name() == "REVEL_FLASH" {
-                let flash: RevelFlash = revel_deserialize::from_bytes(cookie.value().as_bytes())
-                    .chain_err(|| {
-                        ErrorKind::InvalidResponse("Failed to decode \"REVEL_FLASH\"".to_owned())
-                    })?;
-                if let Some(err) = flash.error {
-                    bail!(ErrorKind::Unauthorized(err))
-                } else {
-                    success = flash.success;
-                }
-            }
-        }
-        result
-            .ok_or(
-                ErrorKind::InvalidResponse("No \"REVEL_SESSION\" cookie found".to_owned()).into(),
-            )
-            .map(|x| (x, success))
-    })
+    ).map(|(message, auth)| (auth, message))
 }
 
 pub fn logout(
@@ -216,38 +219,7 @@ pub fn logout(
         vec![],
         Some(auth),
         handle,
-    ).and_then(|response| {
-        ensure!(
-            response.status() == StatusCode::Found,
-            ErrorKind::BadStatus(response.status())
-        );
-        if let Some(cookie) = response.headers().get::<SetCookie>().and_then(|cookies| {
-            cookies
-                .iter()
-                .map(|raw| CookieParser::parse(&**raw))
-                .find(|cookie| {
-                    // FIXME: validate
-                    if let Ok(cookie) = cookie.as_ref() {
-                        cookie.name() == "REVEL_FLASH"
-                    } else {
-                        false
-                    }
-                })
-                .map(::std::result::Result::unwrap)
-        }) {
-            let flash: RevelFlash = revel_deserialize::from_bytes(cookie.value().as_bytes())
-                .chain_err(|| {
-                    ErrorKind::InvalidResponse("Failed to decode \"REVEL_FLASH\"".to_owned())
-                })?;
-            if let Some(err) = flash.error {
-                bail!(ErrorKind::InvalidResponse(err))
-            } else {
-                return Ok(flash.success);
-            }
-        } else {
-            Ok(None)
-        }
-    })
+    ).map(|(message, _)| message)
 }
 
 pub fn join(
@@ -261,45 +233,7 @@ pub fn join(
         vec![],
         Some(auth),
         handle,
-    ).and_then(|response| {
-        ensure!(
-            response.status() == StatusCode::Found,
-            ErrorKind::BadStatus(response.status())
-        );
-        let cookies = response
-            .headers()
-            .get::<SetCookie>()
-            .ok_or(ErrorKind::InvalidResponse("No cookie received".to_owned()))?;
-        let mut result = None;
-        let mut success = None;
-        for raw_cookie in &**cookies {
-            let cookie = CookieParser::parse(&**raw_cookie)
-                .chain_err(|| {
-                    ErrorKind::InvalidResponse("Failed to parse cookie".to_owned())
-                })?;
-            if cookie.name() == "REVEL_SESSION" {
-                result = Some(Authentication {
-                    session: cookie.value().to_owned(),
-                });
-            }
-            if cookie.name() == "REVEL_FLASH" {
-                let flash: RevelFlash = revel_deserialize::from_bytes(cookie.value().as_bytes())
-                    .chain_err(|| {
-                        ErrorKind::InvalidResponse("Failed to decode \"REVEL_FLASH\"".to_owned())
-                    })?;
-                if let Some(err) = flash.error {
-                    bail!(ErrorKind::Unauthorized(err))
-                } else {
-                    success = flash.success;
-                }
-            }
-        }
-        result
-            .ok_or(
-                ErrorKind::InvalidResponse("No \"REVEL_SESSION\" cookie found".to_owned()).into(),
-            )
-            .map(|x| (success, x))
-    })
+    )
 }
 
 #[cfg(test)]
