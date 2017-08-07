@@ -21,7 +21,7 @@ use reqwest::header::{Cookie, SetCookie};
 use reqwest::{RedirectPolicy, StatusCode};
 use cookie::Cookie as CookieParser;
 use select::document::Document;
-use select::predicate::Attr;
+use select::predicate::{Attr, Descendant, Name};
 
 use revel_deserialize::RevelFlash;
 
@@ -48,6 +48,14 @@ error_chain! {
             description("Unexpected response from server")
             display("Unexpected response from server: {}", m)
         }
+
+        NoSuchTask {
+            description("No task matched supplied prefix")
+        }
+
+        NoSuchLanguage {
+            description("No language matched supplied prefix")
+        }
     }
 }
 
@@ -56,8 +64,7 @@ pub struct Authentication {
     session: String,
 }
 
-fn csrf_token(body: &str) -> Option<String> {
-    let document = Document::from(body);
+fn csrf_token(document: &Document) -> Option<String> {
     let mut candidate = document.find(Attr("name", "csrf_token"));
     if let Some(val) = candidate.next().and_then(|node| node.attr("value")) {
         // Sanity check
@@ -72,13 +79,13 @@ fn csrf_token(body: &str) -> Option<String> {
     }
 }
 
-fn get_post(
+fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'static>(
     get: String,
     post: Option<String>,
-    mut form_data: Vec<(&'static str, String)>,
+    form_data: F,
     auth: Option<Authentication>,
     handle: &Handle,
-) -> impl Future<Item = (Option<String>, Authentication), Error = Error> {
+) -> impl Future<Item = (Option<String>, Authentication), Error = Error> + 'static {
     let post = post.unwrap_or(get.clone());
     future::lazy({
         let handle = handle.clone();
@@ -124,27 +131,33 @@ fn get_post(
                 "No \"REVEL_SESSION\" cookie found".to_owned()
             ));
         })
-        .and_then(|(auth, mut response, client)| {
+        .and_then(move |(auth, mut response, client)| {
             return future::ok(auth).join3(
-                response.body_resolved().from_err().and_then(|body| {
-                    csrf_token(::std::str::from_utf8(&body)
+                response.body_resolved().from_err().and_then(move |body| {
+                    let document = Document::from(::std::str::from_utf8(&body)
                         .chain_err(|| {
                             ErrorKind::InvalidResponse("Cannot decode response".to_owned())
-                        })?).ok_or(
-                        ErrorKind::InvalidResponse("Cannot find csrf_token".to_owned()).into(),
-                    )
+                        })?);
+                    let mut form = form_data(&document)?;
+                    form.push((
+                        "csrf_token",
+                        csrf_token(&document)
+                            .ok_or(ErrorKind::InvalidResponse(
+                                "Cannot find csrf_token".to_owned(),
+                            ))?,
+                    ));
+                    Ok(form)
                 }),
                 Ok(client),
             );
         })
         .and_then({
-            move |(auth, csrf_token, client)| {
+            move |(auth, form, client)| {
                 let mut cookie = Cookie::new();
                 cookie.append("REVEL_SESSION", auth.session);
                 let mut request = client.post(&post)?;
                 request.header(cookie);
-                form_data.push(("csrf_token", csrf_token));
-                request.form(&form_data)?;
+                request.form(&form)?;
                 Ok(request.send().from_err())
             }
         })
@@ -197,13 +210,14 @@ pub fn login(
     password: &str,
     handle: &Handle,
 ) -> impl Future<Item = (Authentication, Option<String>), Error = Error> {
+    let form = vec![
+        ("username", username.to_owned()),
+        ("password", password.to_owned()),
+    ];
     get_post(
         format!("{}/login/", API_BASE),
         None,
-        vec![
-            ("username", username.to_owned()),
-            ("password", password.to_owned()),
-        ],
+        move |_| Ok(form),
         None,
         handle,
     ).map(|(message, auth)| (auth, message))
@@ -216,7 +230,7 @@ pub fn logout(
     get_post(
         format!("{}", API_BASE),
         Some(format!("{}/logout/", API_BASE)),
-        vec![],
+        |_| Ok(vec![]),
         Some(auth),
         handle,
     ).map(|(message, _)| message)
@@ -230,7 +244,45 @@ pub fn join(
     get_post(
         format!("{}/contests/{}/", API_BASE, contest),
         Some(format!("{}/contests/{}/register/", API_BASE, contest)),
-        vec![],
+        |_| Ok(vec![]),
+        Some(auth),
+        handle,
+    )
+}
+
+pub fn submit(
+    contest: &str,
+    task: &str,
+    lang: &str,
+    source: String,
+    auth: Authentication,
+    handle: &Handle,
+) -> impl Future<Item = (Option<String>, Authentication), Error = Error> {
+    get_post(
+        format!("{}/contests/{}/submit/", API_BASE, contest),
+        None,
+        {
+            let task = task.to_lowercase();
+            let lang = lang.to_lowercase();
+            move |doc| {
+                let mut tasks = doc.find(Descendant(Attr("id", "select-task"), Name("option")));
+                let task_id = tasks
+                    .find(|t| t.inner_html().to_lowercase().starts_with(&task))
+                    .and_then(|n| n.attr("value"))
+                    .ok_or(ErrorKind::NoSuchTask)?;
+                let select_lang = format!("select-lang-{}", task_id);
+                let mut langs = doc.find(Descendant(Attr("id", &*select_lang), Name("option")));
+                let lang_id = langs
+                    .find(|t| t.inner_html().to_lowercase().starts_with(&lang))
+                    .and_then(|n| n.attr("value"))
+                    .ok_or(ErrorKind::NoSuchLanguage)?;
+                Ok(vec![
+                    ("data.TaskScreenName", task_id.to_owned()),
+                    ("data.LanguageId", lang_id.to_owned()),
+                    ("sourceCode", source),
+                ])
+            }
+        },
         Some(auth),
         handle,
     )
@@ -268,6 +320,51 @@ mod tests {
                 &handle,
             ).and_then(|(auth, _)| {
                 super::join(&env::var("ATCODER_CONTEST_JOIN").unwrap(), auth, &handle)
+            })
+                .and_then(|(_, auth)| super::logout(auth, &handle)),
+        ).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn test_submit() {
+        let mut core = Core::new().unwrap();
+        let handle = core.handle();
+        core.run(
+            super::login(
+                &env::var("ATCODER_USERNAME").unwrap(),
+                &env::var("ATCODER_PASSWORD").unwrap(),
+                &handle,
+            ).and_then(|(auth, _)| {
+                super::submit(
+                    "practice",
+                    "a",
+                    "rust",
+                    "use std::io::{self, BufRead, Write};
+
+fn main() {
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    let mut buf = String::new();
+    input.read_line(&mut buf).unwrap();
+    let a: usize = buf.trim().parse().unwrap();
+    buf.clear();
+    input.read_line(&mut buf).unwrap();
+    let (b, c): (usize, usize) = {
+        let mut split = buf.split_whitespace().map(|s| s.parse().unwrap());
+        (split.next().unwrap(), split.next().unwrap())
+    };
+    buf.clear();
+    input.read_line(&mut buf).unwrap();
+    let s = buf.trim().to_owned();
+    writeln!(output, \"{} {}\", a + b + c, s).unwrap();
+}"
+                        .to_owned(),
+                    auth,
+                    &handle,
+                )
             })
                 .and_then(|(_, auth)| super::logout(auth, &handle)),
         ).unwrap();
