@@ -84,25 +84,22 @@ fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'stati
     post: Option<String>,
     form_data: F,
     auth: Option<Authentication>,
-    handle: &Handle,
+    client: &Client,
 ) -> impl Future<Item = (Option<String>, Authentication), Error = Error> + 'static {
     let post = post.unwrap_or(get.clone());
     future::lazy({
-        let handle = handle.clone();
+        let client = client.clone();
         move || -> Result<_> {
-            let client = Client::builder()?
-                .redirect(RedirectPolicy::none())
-                .build(&handle)?;
             let mut request = client.get(&get)?;
             if let Some(auth) = auth {
                 let mut cookie = Cookie::new();
                 cookie.append("REVEL_SESSION", auth.session);
                 request.header(cookie);
             }
-            Ok(request.send().from_err().join(Ok(client)))
+            Ok(request.send().from_err())
         }
     }).flatten()
-        .and_then(|(response, client)| -> Result<_> {
+        .and_then(|response| -> Result<_> {
             ensure!(
                 response.status() == StatusCode::Ok,
                 ErrorKind::BadStatus(response.status())
@@ -123,7 +120,6 @@ fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'stati
                             session: cookie.value().to_owned(),
                         },
                         response,
-                        client,
                     ));
                 }
             }
@@ -131,8 +127,8 @@ fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'stati
                 "No \"REVEL_SESSION\" cookie found".to_owned()
             ));
         })
-        .and_then(move |(auth, mut response, client)| {
-            return future::ok(auth).join3(
+        .and_then(move |(auth, mut response)| {
+            return future::ok(auth).join(
                 response.body_resolved().from_err().and_then(move |body| {
                     let document = Document::from(::std::str::from_utf8(&body)
                         .chain_err(|| {
@@ -148,11 +144,11 @@ fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'stati
                     ));
                     Ok(form)
                 }),
-                Ok(client),
             );
         })
         .and_then({
-            move |(auth, form, client)| {
+            let client = client.clone();
+            move |(auth, form)| {
                 let mut cookie = Cookie::new();
                 cookie.append("REVEL_SESSION", auth.session);
                 let mut request = client.post(&post)?;
@@ -205,10 +201,17 @@ fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'stati
         })
 }
 
+pub fn create_client(handle: &Handle) -> Result<Client> {
+    Client::builder()?
+        .redirect(RedirectPolicy::none())
+        .build(handle)
+        .map_err(Error::from)
+}
+
 pub fn login(
     username: &str,
     password: &str,
-    handle: &Handle,
+    client: &Client,
 ) -> impl Future<Item = (Authentication, Option<String>), Error = Error> {
     let form = vec![
         ("username", username.to_owned()),
@@ -219,34 +222,34 @@ pub fn login(
         None,
         move |_| Ok(form),
         None,
-        handle,
+        client,
     ).map(|(message, auth)| (auth, message))
 }
 
 pub fn logout(
     auth: Authentication,
-    handle: &Handle,
+    client: &Client,
 ) -> impl Future<Item = Option<String>, Error = Error> {
     get_post(
         format!("{}", API_BASE),
         Some(format!("{}/logout/", API_BASE)),
         |_| Ok(vec![]),
         Some(auth),
-        handle,
+        client,
     ).map(|(message, _)| message)
 }
 
 pub fn join(
     contest: &str,
     auth: Authentication,
-    handle: &Handle,
+    client: &Client,
 ) -> impl Future<Item = (Option<String>, Authentication), Error = Error> {
     get_post(
         format!("{}/contests/{}/", API_BASE, contest),
         Some(format!("{}/contests/{}/register/", API_BASE, contest)),
         |_| Ok(vec![]),
         Some(auth),
-        handle,
+        client,
     )
 }
 
@@ -256,7 +259,7 @@ pub fn submit(
     lang: &str,
     source: String,
     auth: Authentication,
-    handle: &Handle,
+    client: &Client,
 ) -> impl Future<Item = (Option<String>, Authentication), Error = Error> {
     get_post(
         format!("{}/contests/{}/submit/", API_BASE, contest),
@@ -284,7 +287,7 @@ pub fn submit(
             }
         },
         Some(auth),
-        handle,
+        client,
     )
 }
 
@@ -298,13 +301,13 @@ mod tests {
     #[ignore]
     fn test_login_logout() {
         let mut core = Core::new().unwrap();
-        let handle = core.handle();
+        let client = super::create_client(&core.handle()).unwrap();
         core.run(
             super::login(
                 &env::var("ATCODER_USERNAME").unwrap(),
                 &env::var("ATCODER_PASSWORD").unwrap(),
-                &handle,
-            ).and_then(|(auth, _)| super::logout(auth, &handle)),
+                &client,
+            ).and_then(|(auth, _)| super::logout(auth, &client)),
         ).unwrap();
     }
 
@@ -312,16 +315,16 @@ mod tests {
     #[ignore]
     fn test_join() {
         let mut core = Core::new().unwrap();
-        let handle = core.handle();
+        let client = super::create_client(&core.handle()).unwrap();
         core.run(
             super::login(
                 &env::var("ATCODER_USERNAME").unwrap(),
                 &env::var("ATCODER_PASSWORD").unwrap(),
-                &handle,
+                &client,
             ).and_then(|(auth, _)| {
-                super::join(&env::var("ATCODER_CONTEST_JOIN").unwrap(), auth, &handle)
+                super::join(&env::var("ATCODER_CONTEST_JOIN").unwrap(), auth, &client)
             })
-                .and_then(|(_, auth)| super::logout(auth, &handle)),
+                .and_then(|(_, auth)| super::logout(auth, &client)),
         ).unwrap();
     }
 
@@ -329,12 +332,12 @@ mod tests {
     #[ignore]
     fn test_submit() {
         let mut core = Core::new().unwrap();
-        let handle = core.handle();
+        let client = super::create_client(&core.handle()).unwrap();
         core.run(
             super::login(
                 &env::var("ATCODER_USERNAME").unwrap(),
                 &env::var("ATCODER_PASSWORD").unwrap(),
-                &handle,
+                &client,
             ).and_then(|(auth, _)| {
                 super::submit(
                     "practice",
@@ -363,10 +366,10 @@ fn main() {
 }"
                         .to_owned(),
                     auth,
-                    &handle,
+                    &client,
                 )
             })
-                .and_then(|(_, auth)| super::logout(auth, &handle)),
+                .and_then(|(_, auth)| super::logout(auth, &client)),
         ).unwrap();
     }
 }
