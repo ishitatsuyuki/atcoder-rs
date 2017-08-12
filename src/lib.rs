@@ -59,7 +59,7 @@ error_chain! {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Authentication {
     session: String,
 }
