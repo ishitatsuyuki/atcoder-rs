@@ -64,7 +64,6 @@ pub struct Authentication {
     session: String,
 }
 
-#[inline]
 fn csrf_token(document: &Document) -> Option<String> {
     let mut candidate = document.find(Attr("name", "csrf_token"));
     if let Some(val) = candidate.next().and_then(|node| node.attr("value")) {
@@ -274,10 +273,7 @@ pub fn submit(
                     .find(|t| t.inner_html().to_lowercase().starts_with(&task))
                     .and_then(|n| n.attr("value"))
                     .ok_or(ErrorKind::NoSuchTask)?;
-                // FIXME: rust-lang/rust#43135
-                // let select_lang = format!("select-lang-{}", task_id);
-                let mut select_lang = "select-lang-".to_owned();
-                select_lang.push_str(task_id);
+                let select_lang = format!("select-lang-{}", task_id);
                 let mut langs = doc.find(Descendant(Attr("id", &*select_lang), Name("option")));
                 let lang_id = langs
                     .find(|t| t.inner_html().to_lowercase().starts_with(&lang))
