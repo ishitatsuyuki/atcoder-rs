@@ -59,7 +59,10 @@ error_chain! {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// The session returned from the server. This wraps the server-side
+/// implementation details to allow the storage to change from signed
+/// cookies to a more robust one.
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Authentication {
     session: String,
 }
@@ -202,6 +205,7 @@ fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'stati
 }
 
 pub fn create_client(handle: &Handle) -> Result<Client> {
+    //! Build a reqwest client for API usage.
     Client::builder()?
         .redirect(RedirectPolicy::none())
         .build(handle)
@@ -213,6 +217,7 @@ pub fn login(
     password: &str,
     client: &Client,
 ) -> impl Future<Item = (Authentication, Option<String>), Error = Error> {
+    //! Login with username and password.
     let form = vec![
         ("username", username.to_owned()),
         ("password", password.to_owned()),
@@ -230,6 +235,11 @@ pub fn logout(
     auth: Authentication,
     client: &Client,
 ) -> impl Future<Item = Option<String>, Error = Error> {
+    //! Logout, making the current `Authentication` no longer usable.
+    //! # Server-side implementation details
+    //! The server framework, Revel, currently doesn't store sessions in
+    //! database, and thus has no ability to invalidate a token other than
+    //! timing out. Thus, this cannot be used for safety purposes.
     get_post(
         format!("{}", API_BASE),
         Some(format!("{}/logout/", API_BASE)),
@@ -244,6 +254,7 @@ pub fn join(
     auth: Authentication,
     client: &Client,
 ) -> impl Future<Item = (Option<String>, Authentication), Error = Error> {
+    //! Join a contest.
     get_post(
         format!("{}/contests/{}/", API_BASE, contest),
         Some(format!("{}/contests/{}/register/", API_BASE, contest)),
@@ -261,6 +272,9 @@ pub fn submit(
     auth: Authentication,
     client: &Client,
 ) -> impl Future<Item = (Option<String>, Authentication), Error = Error> {
+    //! Submit a resolution.
+    //! The `task` and `lang` parameters are patterns, and are matched against
+    //! the start of the options.
     get_post(
         format!("{}/contests/{}/submit/", API_BASE, contest),
         None,
