@@ -12,7 +12,7 @@ use preferences::{AppInfo, Preferences};
 use rprompt::prompt_reply_stderr;
 use rpassword::prompt_password_stderr;
 use tokio_core::reactor::Core;
-use atcoder::{create_client, join, login, logout, submit, Authentication};
+use atcoder::{create_client, join, login, logout, submit, submissions, Authentication};
 
 const APP_INFO: AppInfo = AppInfo {
     name: "atcoder",
@@ -29,12 +29,13 @@ fn main() {
                                (@arg task: +required)
                                (@arg lang: +required)
                                (@arg file: +required))
+        (@subcommand status => (@arg contest: +required))
     ).get_matches();
 
     let mut core = Core::new().unwrap();
     let client = create_client(&core.handle()).unwrap();
 
-    if let Some(matches) = matches.subcommand_matches("login") {
+    if let Some(_matches) = matches.subcommand_matches("login") {
         // TODO: get credentials as parameter
         let username = prompt_reply_stderr("Username: ").unwrap();
         let password = prompt_password_stderr("Password: ").unwrap();
@@ -81,6 +82,14 @@ fn main() {
             } else {
                 println!("Submit successful");
             };
+            auth.save(&APP_INFO, "auth").unwrap();
+        } else if let Some(matches) = matches.subcommand_matches("status") {
+            let (submissions, auth) = core.run(
+                submissions(matches.value_of("contest").unwrap(), Some(auth), &client),
+            ).unwrap();
+            for submission in submissions {
+                println!("{} {} {} {}", submission.timestamp, submission.task, submission.lang, submission.status);
+            }
             auth.save(&APP_INFO, "auth").unwrap();
         }
     }
