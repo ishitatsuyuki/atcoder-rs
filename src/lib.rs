@@ -15,9 +15,9 @@ extern crate tokio_core;
 mod revel_deserialize;
 
 use std::fmt;
-use futures::{future, Future};
+use futures::{future, Future, Stream};
 use tokio_core::reactor::Handle;
-use reqwest::unstable::async::Client;
+use reqwest::unstable::async::{Client, Chunk};
 use reqwest::header::{Cookie, SetCookie};
 use reqwest::{RedirectPolicy, StatusCode};
 use cookie::Cookie as CookieParser;
@@ -89,11 +89,11 @@ fn get_api(
     endpoint: String,
     auth: Option<Authentication>,
     client: &Client,
-) -> impl Future<Item=(Authentication, Vec<u8>), Error=Error> {
+) -> impl Future<Item=(Authentication, Chunk), Error=Error> {
     future::lazy({
         let client = client.clone();
         move || -> Result<_> {
-            let mut request = client.get(&endpoint)?;
+            let mut request = client.get(&endpoint);
             if let Some(auth) = auth {
                 let mut cookie = Cookie::new();
                 cookie.append("REVEL_SESSION", auth.session);
@@ -125,8 +125,8 @@ fn get_api(
                 "No \"REVEL_SESSION\" cookie found".to_owned(),
             ));
         })
-        .and_then(|(auth, mut response)| {
-            future::ok(auth).join(response.body_resolved().from_err())
+        .and_then(|(auth, response)| {
+            future::ok(auth).join(response.into_body().concat2().from_err())
         })
 }
 
@@ -157,9 +157,9 @@ fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'stati
             move |(auth, form)| {
                 let mut cookie = Cookie::new();
                 cookie.append("REVEL_SESSION", auth.session);
-                let mut request = client.post(&post)?;
+                let mut request = client.post(&post);
                 request.header(cookie);
-                request.form(&form)?;
+                request.form(&form);
                 Ok(request.send().from_err())
             }
         })
@@ -205,7 +205,7 @@ fn get_post<F: FnOnce(&Document) -> Result<Vec<(&'static str, String)>> + 'stati
 
 pub fn create_client(handle: &Handle) -> Result<Client> {
     //! Build a reqwest client for API usage.
-    Client::builder()?
+    Client::builder()
         .redirect(RedirectPolicy::none())
         .build(handle)
         .map_err(Error::from)
